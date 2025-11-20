@@ -1208,6 +1208,9 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   w.sync = options.sync;
   w.done = false;
 
+  //1. 队长统一提交，其他调用者等待
+  //2. 队长写数据间放开锁，其他调用者可以继续排队
+  //3. 队长写数据结束后，一个是通知排队者，一个是通知下一个队长继续
   MutexLock l(&mutex_);
   writers_.push_back(&w);
   while (!w.done && &w != writers_.front()) {
@@ -1231,7 +1234,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     // and protects against concurrent loggers and concurrent writes
     // into mem_.
     {
-      mutex_.Unlock();
+      mutex_.Unlock();//队长准备好了memtable空间，后来者均会排队，此处放锁并IO
       status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
       if (status.ok() && options.sync) {
