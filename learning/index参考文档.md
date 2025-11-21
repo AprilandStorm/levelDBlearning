@@ -198,3 +198,90 @@ leveldb::DB::Open(options, name, &db);
 delete db
 delete options.block_cache;
 ```
+请注意，缓存中存储的是未压缩的数据，因此其大小应根据应用程序级别的数据大小来确定，而不应因压缩而有任何缩减。（压缩块的缓存由操作系统的缓冲区缓存或客户端提供的任何自定义 Env 实现来处理。）\
+执行批量读取时，应用程序可能希望禁用缓存，以避免批量读取处理的数据覆盖大部分缓存内容。可以使用迭代器选项来实现此目的：
+```
+leveldb::ReadOptions options;
+options.fill_cache = false;
+leveldb::Iterator* it = db->NewIterator(options);
+for (it->SeekToFirst(); it->Valid(); it->Next()) {
+  ...
+}
+delete it;
+```
+## key布局
+请注意，磁盘传输和缓存的单位是块。相邻的键（根据数据库的排序顺序）通常会被放置在同一个块中。因此，应用程序可以通过将一起访问的键放在彼此附近，并将不常使用的键放在键空间的单独区域来提高其性能。\
+例如，假设要在 leveldb 之上实现一个简单的文件系统。我们可能希望存储的条目类型有：
+```
+filename -> permission-bits, length, list of file_block_ids
+file_block_id -> data
+```
+我们可能希望文件名键前面加上一个字母（例如“/”），文件块 ID 键前面加上另一个字母（例如“0”），这样，仅扫描元数据时就不会强制我们获取和缓存庞大的文件内容
+## Filter
+由于 LevelDB 数据在磁盘上的组织方式，一次``` Get()``` 调用可能涉及多次磁盘读取。可选的 FilterPolicy 机制可以显著减少磁盘读取次数
+```
+leveldb::Options options;
+options.filter_policy = NewBloomFilterPolicy(10);
+leveldb::DB* db;
+leveldb::DB::Open(options, "/tmp/testdb", &db);
+... use the database ...
+delete db;
+delete options.filter_policy;
+```
+前面的代码将基于布隆过滤器的过滤策略与数据库相关联。基于布隆过滤器的过滤依赖于为每个键在内存中保留一定数量的数据位（在这种情况下，每个键 10 位，因为这是传递给 NewBloomFilterPolicy 的参数）。该过滤器会将 Get () 调用所需的不必要磁盘读取次数减少约 100 倍。增加每个键的位数会进一步减少磁盘读取次数，但代价是更多的内存使用。建议那些工作集无法放入内存且进行大量随机读取的应用程序设置过滤策略。\
+如果您正在使用自定义比较器，那么应当确保所使用的过滤策略与该比较器兼容。例如，假设有一个比较器在比较键时会忽略尾随空格，那么就不能将 NewBloomFilterPolicy 与这种比较器一起使用。相反，应用程序应该提供一个同样会忽略尾随空格的自定义过滤策略。例如:
+```
+class CustomFilterPolicy : public leveldb::FilterPolicy {
+ private:
+  leveldb::FilterPolicy* builtin_policy_;
+
+ public:
+  CustomFilterPolicy() : builtin_policy_(leveldb::NewBloomFilterPolicy(10)) {}
+  ~CustomFilterPolicy() { delete builtin_policy_; }
+
+  const char* Name() const { return "IgnoreTrailingSpacesFilter"; }
+
+  void CreateFilter(const leveldb::Slice* keys, int n, std::string* dst) const {
+    // Use builtin bloom filter code after removing trailing spaces
+    std::vector<leveldb::Slice> trimmed(n);
+    for (int i = 0; i < n; i++) {
+      trimmed[i] = RemoveTrailingSpaces(keys[i]);
+    }
+    builtin_policy_->CreateFilter(trimmed.data(), n, dst);
+  }
+};
+```
+高级应用程序可能会提供一种不使用布隆过滤器，而是使用其他机制来汇总一组键的过滤策略。详情请参阅 ```leveldb/filter_policy.h```
+
+# 校验和
+leveldb 会将校验和与其存储在文件系统中的所有数据相关联。对于这些校验和的验证力度，有两个独立的控制项：可以将 ```ReadOptions::verify_checksums``` 设置为 true，强制对代表特定读取操作从文件系统读取的所有数据进行校验和验证。默认情况下，不执行此类验证。在打开数据库之前，可以将 ```Options::paranoid_checks``` 设置为 true，使数据库实现在检测到内部损坏时立即抛出错误。根据数据库中损坏部分的不同，错误可能在打开数据库时抛出，也可能在之后的其他数据库操作中抛出。默认情况下，偏执模式检查是关闭的，因此即使其持久存储的部分内容已损坏，数据库仍可使用。
+如果数据库损坏（例如，在开启偏执模式检查时无法打开），可以使用 ```leveldb::RepairDB``` 函数来恢复尽可能多的数据。
+
+# Approximate Sizes
+```GetApproximateSizes``` 方法可用于获取一个或多个键范围使用的文件系统空间的近似字节数
+```
+leveldb::Range ranges[2];
+ranges[0] = leveldb::Range("a", "c");
+ranges[1] = leveldb::Range("x", "z");
+uint64_t sizes[2];
+db->GetApproximateSizes(ranges, 2, sizes);
+```
+前面的调用会将 ```sizes[0] ```设置为键范围 ```[a..c)``` 使用的文件系统空间的近似字节数，并将 ```sizes[1] ```设置为键范围 ```[x..z]``` 使用的近似字节数
+
+# 环境Environment
+leveldb 实现所发出的所有文件操作（以及其他操作系统调用）都通过一个 ```leveldb::Env``` 对象进行路由。复杂的客户端可能希望提供自己的 Env 实现，以获得更好的控制权。例如，某个应用程序可能会在文件 IO 路径中引入人为延迟，以限制 leveldb 对系统中其他活动的影响。
+```
+class SlowEnv : public leveldb::Env {
+  ... implementation of the Env interface ...
+};
+
+SlowEnv env;
+leveldb::Options options;
+options.env = &env;
+Status s = leveldb::DB::Open(options, ...);
+```
+# 其他信息
+有关 leveldb 实现的详细信息，请参阅以下文档：
+- [Implementation notes](https://github.com/google/leveldb/blob/main/doc/impl.md)
+- [Format of an immutable Table file](https://github.com/google/leveldb/blob/main/doc/table_format.md)
+- [Format of a log file](https://github.com/google/leveldb/blob/main/doc/log_format.md)
