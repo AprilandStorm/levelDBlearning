@@ -88,11 +88,12 @@ git push origin main  # 推送旧仓库
 
 - 推送 / 拉取相关参数
 
-参数（短 / 长）	全称	核心作用	使用场景	示例
--f	--force	强制推送 / 拉取（覆盖远程或本地内容）	远程内容无用，需覆盖时（谨慎使用）	git push -u origin main --force：
-强制用本地 main 覆盖远程 main（删除远程本地没有的内容）。
---allow-unrelated-histories	无（长参数）	允许合并「无共同提交历史」的两个分支（本地和远程独立创建时）	首次拉取远程，提示 “无相关历史” 时	git pull origin main --allow-unrelated-histories：
-解决你之前 “本地和远程仓库独立创建” 的合并问题。
+|参数（短 / 长）|全称|核心作用|使用场景|示例|
+|----|----|----|----|----|
+|-f|--force|强制推送 / 拉取（覆盖远程或本地内容）|远程内容无用，需覆盖时（谨慎使用）|git push -u origin main --force：
+强制用本地 main 覆盖远程 main（删除远程本地没有的内容）。|
+|--allow-unrelated-histories|无（长参数）|允许合并「无共同提交历史」的两个分支（本地和远程独立创建时）|首次拉取远程，提示 “无相关历史” 时	|git pull origin main --allow-unrelated-histories：
+解决你之前 “本地和远程仓库独立创建” 的合并问题。|
 
 - 查看信息相关参数
 
