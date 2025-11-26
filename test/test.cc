@@ -4,36 +4,48 @@
 #include<string>
 #include<iostream>
 
-using namespace std;
-using namespace leveldb;
 //g++ -o test test.cc ../build/libleveldb.a -I ../include -pthread
 
 int main(){
-    DB* db;
+    leveldb::DB* db; 
     
     //open
-    Options options;
+    leveldb::Options options;
     options.create_if_missing = true;
-    string name = "testdb"; 
-    Status status = DB::Open(options, name, &db);
-    cout << status.ToString() << endl;
+    std::string name = "testdb"; 
+    leveldb::Status status = leveldb::DB::Open(options, name, &db);
+    if(status.ok()){
+        std::cout << "leveldb open success" << std::endl;
+    }
+    else{
+        std::cout << "leveldb open failed: " << status.ToString() << std::endl;
+    }
+    std::cout << status.ToString() << std::endl;
 
     //if(options.comparator == BytewiseComparator()){
     //    cout << "BytewiseComparator" << endl;
     //}
 
     //put
-    WriteOptions woptions;
+    leveldb::WriteOptions woptions;
     status = db->Put(woptions, "name", "yujian");
 
     //get
-    ReadOptions roptions;
-    string value;
+    leveldb::ReadOptions roptions;
+    std::string value;
     status = db->Get(roptions, "name", &value);
-    cout << status.ToString() << "," << value << endl;
+    if(status.ok()){
+        std::cout << status.ToString() << "," << value << std::endl;
+    }
+    else if(status.IsNotFound()){
+        std::cout << "query success, value not found" << std::endl;
+    }
+    else{
+        std::cout << "query failed, reason: " << status.ToString() << std::endl;
+    }
 
     //writebatch
-    WriteBatch batch;
+    leveldb::WriteBatch batch;
     batch.Put("a", "1");
     batch.Put("b", "2");
     status = db->Write(woptions, &batch);
@@ -42,12 +54,12 @@ int main(){
     db->Delete(woptions, "name");
 
     //iterator
-    Iterator* iter = db->NewIterator(roptions);
+    leveldb::Iterator* iter = db->NewIterator(roptions);
     iter->SeekToFirst();
     while(iter->Valid()){
-        Slice key = iter->key();
-        Slice value = iter->value();
-        cout << key.ToString() << "=" << value.ToString() <<endl;
+        leveldb::Slice key = iter->key();
+        leveldb::Slice value = iter->value();
+        std::cout << key.ToString() << "=" << value.ToString() << std::endl;
         iter->Next();
     }
 
