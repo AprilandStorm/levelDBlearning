@@ -271,3 +271,52 @@ Next() (Acquire):
 - 第三阶梯：绝对霸权区 (SeqCst)\
   std::memory_order_seq_cst (顺序一致性)口号： “全体立正！所有人看到的顺序必须一模一样！”含义： 这是 C++ 原子操作的默认选项（如果你不传参数，就是它）。它包含了 Acquire/Release 的所有功能。额外增强： 它保证所有线程看到的**全局执行顺序（Global Order）**是完全一致的。场景： 类似于区块链或中央记账本。不管我在北京做了一个操作，还是你在纽约做了一个操作。全世界看到的结果，都是严格按时间线排好的，没有任何歧义。代价： 极慢。因为它通常需要 CPU 锁住总线或清空流水线，防止任何形式的缓存优化。特殊（被遗弃）区6. std::memory_order_consume现状： 别用它！原本意图： 是 Acquire 的一种优化版，只同步有数据依赖关系的变量。现实： 编译器实现极其困难，绝大多数编译器直接把它当成 Acquire 处理，或者直接忽略优化。C++ 标准委员会都在考虑废弃或重修它。
 
+# LevelDB 号称“无锁读”，为什么 Get 函数开头还要加锁？
+- 结论：LevelDB 的“无锁读”指的是“在读取数据的耗时过程中不持有锁”，而不是“全过程零锁”。
+- 你可以把 DBImpl::Get 的过程想象成 “去图书馆借书”：
+  1. 进门登记（持有锁 mutex_）：你进门时，保安（Mutex）拦住你，给你发一张通行证（Ref() 增加引用计数）。保安告诉你：“最新的书在 A 架（MemTable），昨天的书在 B 架（Immutable），更早的在地下室（SSTables）。”这个过程非常快，只是查一下目录、领个证，几微秒就搞定。
+  2. 找书阅读（释放锁 Unlock）—— 重点在这里！保安放行了！你拿着通行证去书架上找书。找书的过程是最慢的（可能要遍历跳表，可能要从磁盘读文件）。关键点：在你找书的这段漫长时间里，保安（Mutex）是空闲的，他可以接待其他人（其他的写线程或读线程）。这就是所谓的“无锁读”——核心的查找逻辑（I/O 密集型操作）是在无锁状态下并发执行的。
+  3. 出门销毁通行证（持有锁 mutex_）：你看完书了，出门时保安再次拦住你，收回通行证（Unref()）。这也非常快。
+- 代码证据： 请仔细看 db_impl.cc 中 Get 函数的结构：
+```
+Status DBImpl::Get(...) {
+  // 1. 【加锁】获取快照，增加引用计数 (极快)
+  MutexLock l(&mutex_); 
+  MemTable* mem = mem_;
+  MemTable* imm = imm_;
+  Version* current = versions_->current();
+  mem->Ref();
+  if (imm != nullptr) imm->Ref();
+  current->Ref();
+
+  // 2. 【解锁！】这一点至关重要！
+  // MutexLock 对象析构了？不，LevelDB 这里写得比较隐晦。
+  // 注意：LevelDB 源码中，Get 函数里通常显式调用了 mutex_.Unlock();
+  // 或者利用作用域，把上面的加锁逻辑放在一个 {} 块里。
+  
+  // 实际上，LevelDB 源码在获取完 version 后，会显式释放锁：
+  {
+    mutex_.Unlock(); // <--- 看这里！锁在这里被释放了！
+    
+    // 3. 【无锁状态】执行真正的查找 (慢操作)
+    // 此时其他线程可以随便 Write 或 Get，互不干扰
+    LookupKey lkey(...);
+    if (mem->Get(lkey, ...)) { ... }
+    else if (imm->Get(lkey, ...)) { ... }
+    else {
+      current->Get(lkey, ...); // 可能涉及磁盘 I/O
+    }
+    
+    mutex_.Lock(); // <--- 查完回来，重新加锁
+  }
+
+  // 4. 【加锁】清理资源 (极快)
+  mem->Unref();
+  if (imm != nullptr) imm->Unref();
+  current->Unref();
+  
+  return s;
+}
+(注：不同版本的 LevelDB 写法微有不同，但核心逻辑都是：Get Snapshot -> Unlock -> Read Data -> Lock -> Unref)
+```
+所以，LevelDB 的读操作是 “轻量级加锁获取元数据” + “无锁并发读取真实数据”。
